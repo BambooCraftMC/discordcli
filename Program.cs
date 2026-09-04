@@ -1,15 +1,71 @@
 using Discord;
 using Discord.WebSocket;
 using Microsoft.VisualBasic;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json;
+
+public static class conf
+{
+    public static string FMUsername { get; set; } = "";
+    public static string FMApiKey { get; set; } = "";
+
+    public static string Status { get; set; } = "";
+    private static readonly string FilePath = "config.json";
+
+    public static void Save()
+    {
+        var data = new
+        {
+            FMUsername,
+            FMApiKey,
+            Status
+        };
+
+        File.WriteAllText(
+            FilePath,
+            JsonSerializer.Serialize(data, new JsonSerializerOptions
+            {
+                WriteIndented = true
+            })
+        );
+    }
+
+    public static void Load()
+    {
+        if (!File.Exists(FilePath))
+            return;
+
+        var json = File.ReadAllText(FilePath);
+
+        var data = JsonSerializer.Deserialize<ConfigData>(json);
+
+        if (data == null)
+            return;
+
+        FMUsername = data.FMUsername;
+        FMApiKey = data.FMApiKey;
+        Status = data.Status;
+    }
+
+    private class ConfigData
+    {
+        public string FMUsername { get; set; } = "";
+        public string FMApiKey { get; set; } = "";
+        public string Status { get; set; } = "";
+    }
+}
 class Program
 {
+    static string alert = "No alerts";
     private static int pullcnt = 3;
     private static DiscordSocketClient _client;
     public static List<(string, ulong)> allChannels = new List<(string, ulong)>();
     static async Task Main(string[] args)
     {
+        conf.Load();
         Console.OutputEncoding = Encoding.UTF8;
         Console.InputEncoding = Encoding.UTF8;
         Console.WriteLine("TOKEN:");
@@ -35,6 +91,9 @@ class Program
         await _client.StartAsync();
         _client.Ready += () =>
         {
+            
+            _client.SetGameAsync(conf.Status);
+            
             Console.WriteLine("READY!");
             //list all channels
             //and populate channel list for rest of runtime
@@ -128,10 +187,92 @@ class Program
     {
         //if channel is open then refresh the open channel
         if (openChannelID != 0 && imsg.Channel.Id == openChannelID)
-        
-            RefreshOpenChannel();
+        {
+
+            var list = msgs.ToList();
+            list.Add(imsg);
+            msgs = list;
+            _ = DrawOpenChannel();
+        }
+        else
+        {
+            alert = $"{imsg.Author.Username} messaged you in {imsg.Channel.Name} >> {imsg.Content}";
+            DrawOpenChannel();
+        }
+
+    }
+    private static async Task DrawOpenChannel()
+    {
+
+        var chan = await _client.GetChannelAsync(openChannelID) as IMessageChannel;
+        Console.Clear();
+        Console.WriteLine($"   >>{chan.Name}<<");
+        int i = 0;
+        var messages = msgs.ToList();
+        messages = messages[^pullcnt..];
+        foreach (var msg in messages)
+        {
+            if (msg.Reference != null)
+            {
+                var refmsg = await chan.GetMessageAsync(msg.Reference.MessageId.Value);
+                Console.WriteLine($"[{i}]<{msg.Timestamp.LocalDateTime.Hour}:{msg.Timestamp.LocalDateTime.Minute}>({msg.Author.Username}){msg.Author.GlobalName}<@{msg.Author.Id}> >> {msg.Content} (reply to: {refmsg.Author.Username} >> {refmsg.Content}) {string.Join(", ", msg.Attachments.Select(e => e.Url))} {string.Join(", ", msg.Attachments.Select(e => e.Url))}");
+            }
+            else
+                Console.WriteLine($"[{i}]<{msg.Timestamp.LocalDateTime.Hour}:{msg.Timestamp.LocalDateTime.Minute}>({msg.Author.Username}){msg.Author.GlobalName}<@{msg.Author.Id}> >> {msg.Content} {string.Join(", ", msg.Attachments.Select(e => e.Url))}");
+            if (msg.Embeds.Any())
+            {
+                var embed = msg.Embeds.FirstOrDefault();
+
+                PrintEmbed(embed);
+            }
+            i++;
+        }
+        Console.WriteLine($"\n{alert}");
+
+    }
+    static void PrintEmbed(IEmbed embed)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"Recived EMBED, {embed.Title}");
+        Console.WriteLine("╭──────────────────────────────────────────────────────────────");
+
+        // Title
+        if (!string.IsNullOrWhiteSpace(embed.Title))
+        {
+            Console.WriteLine($"│ {embed.Title}");
+
+            if (!string.IsNullOrWhiteSpace(embed.Url))
+                Console.WriteLine($"│ {embed.Url}");
+
+            Console.WriteLine("│");
+        }
+
+        // Description
+        if (!string.IsNullOrWhiteSpace(embed.Description))
+        {
+            foreach (var line in embed.Description.Split('\n'))
+                Console.WriteLine($"│ {line.TrimEnd('\r')}");
+
+            Console.WriteLine("│");
+        }
+
+        // Fields
+        foreach (var field in embed.Fields)
+        {
+            Console.WriteLine($"│ {field.Name}");
+
+            foreach (var line in field.Value.Split('\n'))
+                Console.WriteLine($"│ {line.TrimEnd('\r')}");
+
+            Console.WriteLine("│");
+        }
+
+
+        Console.WriteLine("╰──────────────────────────────────────────────────────────────");
+        Console.WriteLine();
     }
     // refresh the open channel so that its populated with new messages
+    public static IEnumerable<IMessage> msgs = null;
     private static async Task RefreshOpenChannel()
     {
         
@@ -140,24 +281,11 @@ class Program
             {
                 Console.WriteLine("Channel is null!");
             }
-            var msgs = await chan.GetMessagesAsync(pullcnt).FlattenAsync();
+            msgs = await chan.GetMessagesAsync(pullcnt).FlattenAsync();
             msgs = msgs.Reverse();
-            Console.Clear();
-            Console.WriteLine($"   >>{chan.Name}<<");
-            int i = 0;
-            foreach (var msg in msgs)
-            {
-                if (msg.Reference != null)
-            {
-                var refmsg = await chan.GetMessageAsync(msg.Reference.MessageId.Value);
-                Console.WriteLine($"[{i}]<{msg.Timestamp.LocalDateTime.Hour}:{msg.Timestamp.LocalDateTime.Minute}>({msg.Author.Username}){msg.Author.GlobalName}<@{msg.Author.Id}> >> {msg.Content} (reply to: {refmsg.Author.Username} >> {refmsg.Content}) {string.Join(", ", msg.Attachments.Select(e => e.Url))}");
-            }
-            else
-                Console.WriteLine($"[{i}]<{msg.Timestamp.LocalDateTime.Hour}:{msg.Timestamp.LocalDateTime.Minute}>({msg.Author.Username}){msg.Author.GlobalName}<@{msg.Author.Id}> >> {msg.Content} {string.Join(", ", msg.Attachments.Select(e => e.Url))}");
+        await DrawOpenChannel();
 
-                i++;
-            }
-        
+
     }
     // open the channel for viewing of the user
     private static async Task OpenChannel(IMessageChannel chan)
@@ -181,33 +309,37 @@ class Program
             var msgtosend = Console.ReadLine();
             msgtosend = msgtosend.Replace("\\n", "\n");
             //delete by index
-            if (msgtosend.StartsWith("del "))
+            if (msgtosend.StartsWith("del ") || msgtosend.StartsWith("rm "))
             {
                 await Task.Run(async () => {
-                    var Enumessages = await chan.GetMessagesAsync(100).FlattenAsync();
-                    var messages = Enumessages.ToList();
-                    messages.Reverse();
+                    // fixed. uses RPLY logic
+                    var messages = msgs.ToList();
                     int todelete = -1;
-                    if (int.TryParse(msgtosend.Substring(4), out todelete))
-                    {
-                    if (messages[todelete] != null)
+                    string arg1 = "null";
+                    if (msgtosend.StartsWith("del "))
+                        arg1 = msgtosend.Substring(4);
+                    else
+                        arg1 = msgtosend.Substring(3);
+                    if (int.TryParse(arg1, out todelete))
                         {
-                            try
+                            if (messages[todelete] != null)
                             {
-                                
-                                await messages[todelete].DeleteAsync();
-                                await RefreshOpenChannel();
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine("Could not delete message! " + ex.Message);
+                                try
+                                {
+
+                                    await messages[todelete].DeleteAsync();
+                                    await RefreshOpenChannel();
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine("Could not delete message! " + ex.Message);
+                                }
                             }
                         }
-                    }
-                    else
-                    {
-                        Console.WriteLine("INVALID INT");
-                    }
+                        else
+                        {
+                            Console.WriteLine("INVALID INT");
+                        }
 
                 });
             }
@@ -239,13 +371,92 @@ class Program
                 foreach (var guild in guilds)
                 {
                     var users = guild.Users;
+                    List<string> output = new List<string>();
                     foreach (var user in users)
                     {
-                        Console.WriteLine($" - {user.Username} {user.Status} {user.Activities.FirstOrDefault()?.Details}");
+                        if (user.Activities.FirstOrDefault(a => a.Type == ActivityType.CustomStatus) is CustomStatusGame customStatus)
+                        {
+                            var outline = $" - {user.Username} {user.Status} {customStatus.State}";
+                            if (!output.Contains(outline))
+                                output.Add(outline);
+                        }
+                        }
+                    }
+            }
+            else if (msgtosend.ToLower().StartsWith("setStatus".ToLower()))
+            {
+                string arg = msgtosend.Substring(10);
+                await _client.SetGameAsync(arg);
+                conf.Status = arg;
+                conf.Save();
+            }
+            else if (msgtosend.StartsWith("rply"))
+            {
+                //get the number and the message
+                var arg1 = msgtosend.Substring(5);
+                //get the number from arg 1 then get the message from arg 1
+                var arg2 = arg1.Substring(arg1.IndexOf(" ") + 1);
+                var arg1num = arg1.Substring(0, arg1.IndexOf(" "));
+                var msgslist = msgs.ToList();
+                if (int.TryParse(arg1num, out int intarg))
+                {
+                    if (msgslist[intarg] != null)
+                    {
+                        try
+                        {
+                            //await msgslist[intarg];
+                            await chan.SendMessageAsync(arg2, messageReference: new MessageReference(msgslist[intarg].Id));
+                            await RefreshOpenChannel();
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("Could not reply to message! " + ex.Message);
+                        }
                     }
                 }
+                
+                else
+                {
+                    Console.WriteLine("INVALID INT");
+                }
             }
-            else 
+            else if (msgtosend.StartsWith("fm"))
+            {
+                //get the last.fm username and api key from the config file
+                Console.WriteLine("FM RUNNING!");
+                var username = conf.FMUsername;
+                var apiKey = conf.FMApiKey;
+                using var httpClient = new HttpClient();
+                var trackInfo = await GetCurrentlyPlayingTrackAsync(httpClient, username, apiKey);
+                if (trackInfo != null)
+                {
+                    var embedmaker = new Discord.EmbedBuilder()
+                    {
+                        Title = "Now Playing",
+                        Description = $"{trackInfo.Artist} - {trackInfo.Name}",
+                        Color = Discord.Color.Blue
+                    };
+                    await chan.SendMessageAsync(embed: embedmaker.Build());
+                    await RefreshOpenChannel();
+                }
+                else
+                {
+                    await chan.SendMessageAsync($"No track is currently playing for {username}.");
+                    await RefreshOpenChannel();
+                }
+            }
+            else if (msgtosend.StartsWith("help"))
+            {
+                Console.WriteLine("Commands:");
+                Console.WriteLine("del | rm <index> - delete a message by index");
+                Console.WriteLine("backout | cd .. - go back to channel selector");
+                Console.WriteLine("pull <number> - set the number of messages to pull");
+                Console.WriteLine("lsusers - list all users and their statuses");
+                Console.WriteLine("setStatus <status> - set the bot's status");
+                Console.WriteLine("rply <index> <message> - reply to a message by index");
+                Console.WriteLine($"fm - get the currently playing track from last.fm as {conf.FMUsername} (config.json)");
+            }
+            else
                 await Task.Run(() => { chan.SendMessageAsync(msgtosend); });
         }
     }
@@ -254,5 +465,93 @@ class Program
     {
         Console.WriteLine(msg.ToString());
         return Task.CompletedTask;
+    }
+    //ai API requests
+    static async Task<TrackInfo?> GetCurrentlyPlayingTrackAsync(
+    HttpClient httpClient,
+    string username,
+    string apiKey)
+    {
+        var requestUrl =
+            "https://ws.audioscrobbler.com/2.0/?" +
+            "method=user.getrecenttracks" +
+            $"&user={Uri.EscapeDataString(username)}" +
+            $"&api_key={Uri.EscapeDataString(apiKey)}" +
+            "&format=json" +
+            "&limit=1";
+
+        using var response = await httpClient.GetAsync(requestUrl);
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+            return null;
+
+        using var document = JsonDocument.Parse(responseBody);
+        var root = document.RootElement;
+
+        if (root.TryGetProperty("error", out _))
+            return null;
+
+        if (!root.TryGetProperty("recenttracks", out var recentTracks) ||
+            !recentTracks.TryGetProperty("track", out var tracks))
+            return null;
+
+        var track = tracks.ValueKind switch
+        {
+            JsonValueKind.Array when tracks.GetArrayLength() > 0 => tracks[0],
+            JsonValueKind.Object => tracks,
+            _ => default
+        };
+
+        if (track.ValueKind != JsonValueKind.Object)
+            return null;
+
+        var name = track.TryGetProperty("name", out var nameElement)
+            ? WebUtility.HtmlDecode(nameElement.GetString())
+            : null;
+
+        string? artist = null;
+
+        if (track.TryGetProperty("artist", out var artistElement))
+        {
+            if (artistElement.ValueKind == JsonValueKind.String)
+            {
+                artist = WebUtility.HtmlDecode(artistElement.GetString());
+            }
+            else if (artistElement.ValueKind == JsonValueKind.Object &&
+                     artistElement.TryGetProperty("#text", out var artistText))
+            {
+                artist = WebUtility.HtmlDecode(artistText.GetString());
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(name) ||
+            string.IsNullOrWhiteSpace(artist))
+            return null;
+
+        var isNowPlaying =
+            track.TryGetProperty("@attr", out var attributes) &&
+            attributes.TryGetProperty("nowplaying", out var nowPlaying) &&
+            string.Equals(
+                nowPlaying.GetString(),
+                "true",
+                StringComparison.OrdinalIgnoreCase);
+
+        if (!isNowPlaying)
+            return null;
+
+        return new TrackInfo(name, artist);
+    }
+
+    public class TrackInfo
+    {
+        public TrackInfo(string name, string artist)
+        {
+            Name = name;
+            Artist = artist;
+        }
+
+        public string Name { get; }
+        public string Artist { get; }
     }
 }
