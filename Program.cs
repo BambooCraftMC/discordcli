@@ -1,11 +1,15 @@
 using Discord;
 using Discord.WebSocket;
 using Microsoft.VisualBasic;
+using System.ComponentModel.Design;
+using System.Diagnostics;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading.Channels;
 
 public static class conf
 {
@@ -59,10 +63,11 @@ public static class conf
 }
 class Program
 {
+    static string msgtosend = "";
     static string alert = "No alerts";
     private static int pullcnt = 3;
     private static DiscordSocketClient _client;
-    public static List<(string, ulong)> allChannels = new List<(string, ulong)>();
+    public static List<(string, ulong,string)> allChannels = new List<(string, ulong, string)>();
     static async Task Main(string[] args)
     {
         conf.Load();
@@ -85,6 +90,7 @@ class Program
         //subscribe to logging and message recived events
         _client.Log += Log;
         _client.MessageReceived += MessageRecived;
+        _client.UserIsTyping += UserIsTyping;
 
         // login with the token
         await _client.LoginAsync(TokenType.Bot, token);
@@ -103,17 +109,21 @@ class Program
                 Console.WriteLine(guild.Name);
                 //list all channels
                 var channels = guild.Channels;
+                allChannels.Add(("\nSRV>>", 0, guild.Name + "<<"));
                 foreach (var channel in channels)
                 {
-                    Console.WriteLine($"-  {channel.Name}({channel.Id})");
-                    allChannels.Add((channel.Name, channel.Id));
+                    if (channel.GetChannelType() != ChannelType.Category && channel.GetChannelType() != ChannelType.Stage)
+                    {
+                        Console.WriteLine($"-  {channel.Name}({channel.Id})");
+                        allChannels.Add(("- " +channel.Name, channel.Id, channel.Guild.Name + ((channel.GetChannelType() == ChannelType.Voice) ? "-voice" : "-txt")));
+                    }
                 }
                 var users = guild.Users;
                 foreach (var user in users)
                 {
                     Console.WriteLine($"- USR.{user.Username}");
-                    if (!allChannels.Contains(($"USR.{user.Username}", user.Id)))
-                        allChannels.Add(($"USR.{user.Username}", user.Id));
+                    if (!allChannels.Contains(($"USR.{user.Username}", user.Id, "DMS")))
+                        allChannels.Add(($">USR.{user.Username}", user.Id, "DMS"));
                 }
 
 
@@ -123,6 +133,20 @@ class Program
         };
         await Task.Delay(-1);
     }
+
+    private static async Task UserIsTyping(Cacheable<IUser, ulong> cacheable1, Cacheable<IMessageChannel, ulong> cacheable2)
+    {
+        // check if is in openchannelid and if so cw(<username> typing...)
+        if (cacheable1.Id == _client.CurrentUser.Id)
+            return;
+        if (openChannelID != 0 && cacheable2.Id == openChannelID)
+        {
+            var user = await cacheable1.GetOrDownloadAsync();
+            alert += $"\n{user.Username} is typing...";
+            
+        }
+    }
+
     // opens the channel selector
     private static async Task OpenSelector()
     {
@@ -148,10 +172,16 @@ class Program
                 var channelid = allChannels[selected].Item2;
                 // seperate users from normal text channels. 
                 //still oddly flags catagorys as text channels but i cant fix that rn
-                if (allChannels[selected].Item1.StartsWith("USR"))
+                if (allChannels[selected].Item1.StartsWith(">USR"))
                 {
                     var chan = _client.GetUserAsync(channelid).GetAwaiter().GetResult().CreateDMChannelAsync().GetAwaiter().GetResult() as IMessageChannel;
                     _ = OpenChannel(chan);
+                }
+                else if (allChannels[selected].Item1.StartsWith("\nSRV"))
+                {
+                    Console.WriteLine("INVALID CHANNEL!");
+                    _ = OpenSelector();
+                    return;
                 }
                 else
                 {
@@ -173,53 +203,86 @@ class Program
             if (allChannels.IndexOf(channel) == selected)
             {
                 Console.BackgroundColor = ConsoleColor.Green;
-                Console.WriteLine($"> {channel.Item1}({channel.Item2})");
+                Console.WriteLine($"> {channel.Item1}({channel.Item3})");
                 Console.BackgroundColor = ConsoleColor.Black;
             }
             else
             {
-                Console.WriteLine($"  {channel.Item1}({channel.Item2})");
+                Console.WriteLine($"  {channel.Item1}({channel.Item3})");
             }
         }
     }
     private static ulong openChannelID = 0;
-    private static async Task MessageRecived(SocketMessage imsg)
+    private static async Task MessageRecived(SocketMessage msg)
     {
         //if channel is open then refresh the open channel
-        if (openChannelID != 0 && imsg.Channel.Id == openChannelID)
+        if (openChannelID != 0 && msg.Channel.Id == openChannelID)
         {
 
             var list = msgs.ToList();
-            list.Add(imsg);
+            list.Add(msg);
+            list = list[^pullcnt..];
             msgs = list;
-            _ = DrawOpenChannel();
+            QuickDrawMSG.Add($"<{msg.Timestamp.LocalDateTime.Hour}:{msg.Timestamp.LocalDateTime.Minute}>({msg.Author.Username}){msg.Author.GlobalName}<@{msg.Author.Id}> >> {msg.Content} {string.Join(", ", msg.Attachments.Select(e => e.Url))}");
+            QuickDrawMSG = QuickDrawMSG[^pullcnt..];
+
+
+            _ = QuickDraw();
+            List<string> thing = alert.Split("\n").ToList();
+            thing.RemoveAll(x => Regex.IsMatch(x, @"^.* is typing\.\.\.$"));
+            alert = string.Join("\n", thing);
         }
         else
         {
-            alert = $"{imsg.Author.Username} messaged you in {imsg.Channel.Name} >> {imsg.Content}";
-            DrawOpenChannel();
+            alert = $"{msg.Author.Username} messaged you in {msg.Channel.Name} >> {msg.Content}";
+            QuickDraw();
         }
 
     }
+    static List<string> QuickDrawMSG = new List<string>();
+    static string QuickDrawHeader = "";
+    static List<string> QuickDrawother = new List<string>();
+    private static async Task QuickDraw()
+    {
+        Console.Clear();
+        Console.WriteLine(QuickDrawHeader);
+        
+        QuickDrawMSG = QuickDrawMSG[^pullcnt..];
+        int i = 0;
+        foreach (string msg in QuickDrawMSG)
+        {
+            Console.WriteLine($"[{i}]{msg}");
+            i++;
+        }
+        Console.WriteLine(String.Join("\n", QuickDrawother));
+        Console.WriteLine("\n" + alert);
+        Console.Write(msgtosend);
+    }
     private static async Task DrawOpenChannel()
     {
-
+        QuickDrawother.Clear();
         var chan = await _client.GetChannelAsync(openChannelID) as IMessageChannel;
         Console.Clear();
         Console.WriteLine($"   >>{chan.Name}<<");
+        QuickDrawHeader = $"   >>{chan.Name}<<";
         int i = 0;
         var messages = msgs.ToList();
         messages = messages[^pullcnt..];
+        msgs = messages;
         foreach (var msg in messages)
         {
             if (msg.Reference != null)
             {
                 var refmsg = await chan.GetMessageAsync(msg.Reference.MessageId.Value);
                 Console.WriteLine($"[{i}]<{msg.Timestamp.LocalDateTime.Hour}:{msg.Timestamp.LocalDateTime.Minute}>({msg.Author.Username}){msg.Author.GlobalName}<@{msg.Author.Id}> >> {msg.Content} (reply to: {refmsg.Author.Username} >> {refmsg.Content}) {string.Join(", ", msg.Attachments.Select(e => e.Url))} {string.Join(", ", msg.Attachments.Select(e => e.Url))}");
+                QuickDrawMSG.Add($"<{msg.Timestamp.LocalDateTime.Hour}:{msg.Timestamp.LocalDateTime.Minute}>({msg.Author.Username}){msg.Author.GlobalName}<@{msg.Author.Id}> >> {msg.Content} (reply to: {refmsg.Author.Username} >> {refmsg.Content}) {string.Join(", ", msg.Attachments.Select(e => e.Url))} {string.Join(", ", msg.Attachments.Select(e => e.Url))}");
             }
             else
+            {
                 Console.WriteLine($"[{i}]<{msg.Timestamp.LocalDateTime.Hour}:{msg.Timestamp.LocalDateTime.Minute}>({msg.Author.Username}){msg.Author.GlobalName}<@{msg.Author.Id}> >> {msg.Content} {string.Join(", ", msg.Attachments.Select(e => e.Url))}");
-            if (msg.Embeds.Any())
+                QuickDrawMSG.Add($"<{msg.Timestamp.LocalDateTime.Hour}:{msg.Timestamp.LocalDateTime.Minute}>({msg.Author.Username}){msg.Author.GlobalName}<@{msg.Author.Id}> >> {msg.Content} {string.Join(", ", msg.Attachments.Select(e => e.Url))}");
+            }
+                if (msg.Embeds.Any())
             {
                 var embed = msg.Embeds.FirstOrDefault();
 
@@ -228,48 +291,71 @@ class Program
             i++;
         }
         Console.WriteLine($"\n{alert}");
-
+        Console.Write(msgtosend);
     }
     static void PrintEmbed(IEmbed embed)
     {
+        var totalwritten = "";
         Console.WriteLine();
-        Console.WriteLine($"Recived EMBED, {embed.Title}");
+        totalwritten += "\n";
         Console.WriteLine("╭──────────────────────────────────────────────────────────────");
+        totalwritten += "╭──────────────────────────────────────────────────────────────\n";
 
         // Title
         if (!string.IsNullOrWhiteSpace(embed.Title))
         {
             Console.WriteLine($"│ {embed.Title}");
+            totalwritten += $"│ {embed.Title}\n";
 
             if (!string.IsNullOrWhiteSpace(embed.Url))
+            {
                 Console.WriteLine($"│ {embed.Url}");
+                totalwritten += $"│ {embed.Url}\n";
+            }
 
-            Console.WriteLine("│");
+
+                Console.WriteLine("│");
+            totalwritten += "│\n";
         }
 
         // Description
         if (!string.IsNullOrWhiteSpace(embed.Description))
         {
             foreach (var line in embed.Description.Split('\n'))
+            {
                 Console.WriteLine($"│ {line.TrimEnd('\r')}");
+                totalwritten += $"│ {line.TrimEnd('\r')}\n";
+            }
 
             Console.WriteLine("│");
+            totalwritten += "│\n";
         }
 
         // Fields
         foreach (var field in embed.Fields)
         {
             Console.WriteLine($"│ {field.Name}");
+            totalwritten += $"│ {field.Name}\n";
 
             foreach (var line in field.Value.Split('\n'))
+            {
                 Console.WriteLine($"│ {line.TrimEnd('\r')}");
+                QuickDrawother.Add($"│ {line.TrimEnd('\r')}");
+            }
 
             Console.WriteLine("│");
+            totalwritten += "│\n";
         }
 
 
         Console.WriteLine("╰──────────────────────────────────────────────────────────────");
+        totalwritten += "╰──────────────────────────────────────────────────────────────\n";
         Console.WriteLine();
+        totalwritten += "\n";
+        var lst = QuickDrawMSG.Last();
+        QuickDrawMSG.Remove(lst); // remove last
+        QuickDrawMSG.Add(lst + totalwritten );
+        
     }
     // refresh the open channel so that its populated with new messages
     public static IEnumerable<IMessage> msgs = null;
@@ -306,12 +392,34 @@ class Program
         while (true)
         {
             // read a line
-            var msgtosend = Console.ReadLine();
+            msgtosend = "";
+            var key = Console.ReadKey();
+            msgtosend += key.KeyChar;
+            await chan.TriggerTypingAsync();
+            QuickDraw();
+            while (true)
+            {
+                key = Console.ReadKey();
+                Debug.Write(key.KeyChar);
+                if (key.KeyChar == '\n' || key.KeyChar == '\r')
+                {
+                    if (!string.IsNullOrEmpty(msgtosend))
+                        break;
+                }
+                if (key.Key == ConsoleKey.Backspace && !string.IsNullOrEmpty(msgtosend))
+                {
+                    msgtosend = msgtosend[..^1];
+                    QuickDraw();
+                }
+                else
+                    msgtosend += key.KeyChar;
+            }
             msgtosend = msgtosend.Replace("\\n", "\n");
             //delete by index
             if (msgtosend.StartsWith("del ") || msgtosend.StartsWith("rm "))
             {
-                await Task.Run(async () => {
+                await Task.Run(async () =>
+                {
                     // fixed. uses RPLY logic
                     var messages = msgs.ToList();
                     int todelete = -1;
@@ -321,25 +429,37 @@ class Program
                     else
                         arg1 = msgtosend.Substring(3);
                     if (int.TryParse(arg1, out todelete))
+                    {
+                        if (messages[todelete] != null)
                         {
-                            if (messages[todelete] != null)
+                            try
                             {
-                                try
+                                Console.Clear();
+                                Console.WriteLine($"Delete? ({messages[todelete].Content}");
+                                var ynstring = Console.ReadLine().ToLower();
+                                bool yn = ynstring == "yes"|| ynstring=="y";
+                                if (yn)
                                 {
-
                                     await messages[todelete].DeleteAsync();
                                     await RefreshOpenChannel();
                                 }
-                                catch (Exception ex)
+                                else
                                 {
-                                    Console.WriteLine("Could not delete message! " + ex.Message);
+                                    Console.WriteLine("Canceled");
+                                    Thread.Sleep(3000);
+                                    await DrawOpenChannel();
                                 }
+                                }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine("Could not delete message! " + ex.Message);
                             }
                         }
-                        else
-                        {
-                            Console.WriteLine("INVALID INT");
-                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("INVALID INT");
+                    }
 
                 });
             }
@@ -350,14 +470,26 @@ class Program
                 _ = OpenSelector();
                 return;
             }
+            // refresh
+            else if (msgtosend.StartsWith("ref"))
+            {
+                await RefreshOpenChannel();
+            }
+            //OHSHIT
+            else if (msgtosend == "p")
+            {
+                Console.Clear();
+                Console.WriteLine("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+                Environment.Exit(0);
+            }
             //update the amount of messages to pull every time
-            else if (msgtosend.StartsWith("pull ")) 
+            else if (msgtosend.StartsWith("pull "))
             {
                 string arg = msgtosend.Substring(5);
                 if (int.TryParse(arg, out int intarg))
                 {
                     pullcnt = intarg;
-                    Console.WriteLine("Updated to "+ intarg);
+                    Console.WriteLine("Updated to " + intarg);
                     await RefreshOpenChannel();
                 }
                 else
@@ -368,10 +500,12 @@ class Program
             else if (msgtosend.StartsWith("lsusers"))
             {
                 var guilds = _client.Guilds;
+                List<string> output = new List<string>();
                 foreach (var guild in guilds)
                 {
                     var users = guild.Users;
-                    List<string> output = new List<string>();
+                    
+                    Console.WriteLine($"Getting {guild.Name}");
                     foreach (var user in users)
                     {
                         if (user.Activities.FirstOrDefault(a => a.Type == ActivityType.CustomStatus) is CustomStatusGame customStatus)
@@ -380,8 +514,15 @@ class Program
                             if (!output.Contains(outline))
                                 output.Add(outline);
                         }
+                        {
+                            var outline = $" - {user.Username} {user.Status}";
+                            if (!output.Contains(outline))
+                                output.Add(outline);
                         }
                     }
+                }
+                Console.WriteLine($"{string.Join("\n", output)}");
+                
             }
             else if (msgtosend.ToLower().StartsWith("setStatus".ToLower()))
             {
@@ -414,7 +555,7 @@ class Program
                         }
                     }
                 }
-                
+
                 else
                 {
                     Console.WriteLine("INVALID INT");
